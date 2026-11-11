@@ -15,6 +15,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import java.io.FilterInputStream
 import java.io.FileInputStream
 import java.io.InputStream
 import java.util.zip.ZipInputStream
@@ -98,48 +99,82 @@ class MainActivity : ComponentActivity() {
         thread {
             try {
                 val found = sortedSetOf<String>()
+                val rewards = sortedSetOf<String>()
                 var nested = 0
                 var dexCount = 0
+                var entries = 0
                 val markers = mapOf("com/google/android/gms/ads" to "Google Mobile Ads / AdMob",
                     "com.google.android.gms.ads" to "Google Mobile Ads / AdMob",
                     "com/unity3d/ads" to "Unity Ads",
                     "com.unity3d.ads" to "Unity Ads")
-                val inputs = streams()
-                try {
-                    inputs.forEach { input ->
-                        ZipInputStream(input.buffered()).use { zip ->
-                            while (true) {
-                                val entry = zip.nextEntry ?: break
-                                val entryName = entry.name.lowercase()
-                                markers.forEach { (key, value) -> if (entryName.contains(key)) found.add(value) }
-                                if (entryName.endsWith(".apk")) nested++
-                                if (!entry.isDirectory && entryName.matches(Regex("(^|.*/)classes[0-9]*\\.dex"))) {
-                                    dexCount++
-                                    val buffer = ByteArray(65536)
-                                    var tail = ""
+                val rewardMarkers = mapOf("onuserearnedreward" to "Google reward callback",
+                    "rewardedad" to "Rewarded ad reference",
+                    "rewardedinterstitialad" to "Rewarded interstitial reference",
+                    "iunityadsloadlistener" to "Unity Ads listener reference")
+                fun check(text: String) {
+                    markers.forEach { (key, value) -> if (text.contains(key)) found.add(value) }
+                    rewardMarkers.forEach { (key, value) -> if (text.contains(key)) rewards.add(value) }
+                }
+                fun inspect(input: InputStream, allowNested: Boolean) {
+                    ZipInputStream(input.buffered()).use { zip ->
+                        while (true) {
+                            val entry = zip.nextEntry ?: break
+                            if (++entries > 50000) throw IllegalArgumentException("Archive entry limit exceeded")
+                            val entryName = entry.name.lowercase()
+                            check(entryName)
+                            if (!entry.isDirectory && allowNested && entryName.endsWith(".apk")) {
+                                nested++
+                                // Closing the nested reader must not close the outer archive.
+                                val bounded = object : FilterInputStream(zip) {
                                     var total = 0L
-                                    while (true) {
-                                        val count = zip.read(buffer)
-                                        if (count <= 0) break
-                                        total += count
-                                        if (total > 128L * 1024 * 1024) throw IllegalArgumentException("DEX exceeds 128 MB scan limit")
-                                        val text = tail + String(buffer, 0, count, Charsets.ISO_8859_1).lowercase()
-                                        markers.forEach { (key, value) -> if (text.contains(key)) found.add(value) }
-                                        tail = text.takeLast(64)
+                                    override fun read(): Int {
+                                        val result = super.read()
+                                        if (result >= 0 && ++total > 512L * 1024 * 1024)
+                                            throw IllegalArgumentException("Nested APK exceeds 512 MB scan limit")
+                                        return result
                                     }
+                                    override fun read(b: ByteArray, off: Int, len: Int): Int {
+                                        val count = super.read(b, off, len)
+                                        if (count > 0) {
+                                            total += count
+                                            if (total > 512L * 1024 * 1024)
+                                                throw IllegalArgumentException("Nested APK exceeds 512 MB scan limit")
+                                        }
+                                        return count
+                                    }
+                                    override fun close() {}
                                 }
-                                zip.closeEntry()
+                                inspect(bounded, false)
+                            } else if (!entry.isDirectory && entryName.matches(Regex("(^|.*/)classes[0-9]*\\\\.dex"))) {
+                                dexCount++
+                                val buffer = ByteArray(65536)
+                                var tail = ""
+                                var total = 0L
+                                while (true) {
+                                    val count = zip.read(buffer)
+                                    if (count <= 0) break
+                                    total += count
+                                    if (total > 128L * 1024 * 1024) throw IllegalArgumentException("DEX exceeds 128 MB scan limit")
+                                    val text = tail + String(buffer, 0, count, Charsets.ISO_8859_1).lowercase()
+                                    check(text)
+                                    tail = text.takeLast(64)
+                                }
                             }
+                            zip.closeEntry()
                         }
                     }
-                } finally { inputs.forEach { try { it.close() } catch (_: Exception) {} } }
+                }
+                val inputs = streams()
+                try { inputs.forEach { inspect(it, true) } }
+                finally { inputs.forEach { try { it.close() } catch (_: Exception) {} } }
                 val result = buildString {
                     append("Scan: $name\n\n")
                     if (found.isEmpty()) append("No supported ad SDK markers found.\n")
                     else append("Possible SDK markers:\n" + found.joinToString("\n") { "• $it" } + "\n")
+                    if (rewards.isNotEmpty()) append("\nPossible reward-related references:\n" + rewards.joinToString("\n") { "• $it" } + "\n")
                     append("\nDEX files scanned: $dexCount\n")
-                    if (nested > 0) append("Nested APK files found: $nested (not scanned in this version).\n")
-                    append("\nDetection is heuristic and may miss SDKs. It does not confirm compatibility, reward availability, or ad speed control. This version does not modify or install apps.")
+                    if (nested > 0) append("Nested APK files inspected: $nested\n")
+                    append("\nMarkers are clues, not proof that rewards are active or modifiable. Native code, server validation and obfuscated code are not analyzed. This version does not modify, sign or install apps.")
                 }
                 runOnUiThread { report = result; busy = false }
             } catch (e: Exception) {
