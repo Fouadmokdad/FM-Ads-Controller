@@ -145,7 +145,7 @@ class MainActivity : ComponentActivity() {
                                     override fun close() {}
                                 }
                                 inspect(bounded, false)
-                            } else if (!entry.isDirectory && entryName.matches(Regex("(^|.*/)classes[0-9]*\\\\.dex"))) {
+                            } else if (!entry.isDirectory && entryName.matches(Regex("(^|.*/)classes[0-9]*\\.dex"))) {
                                 dexCount++
                                 val buffer = ByteArray(65536)
                                 var tail = ""
